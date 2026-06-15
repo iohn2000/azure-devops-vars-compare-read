@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 """
-Read variables from Azure DevOps Variable Groups (Pipeline Library).
+Read/write variables in Azure DevOps Variable Groups (Pipeline Library).
 
 Authentication: Personal Access Token (PAT) with at least
-  - Variable Groups: Read scope
+  - Variable Groups: Read & Manage scope
   - Project: Read scope
 
 Usage:
-  python read_devops_vars.py                                    # list all variable groups
-  python read_devops_vars.py --group "MyGroup"                  # show vars in a specific group
-  python read_devops_vars.py --group "MyGroup" --key MY_VAR     # get a single value
-  python read_devops_vars.py --group "MyGroup" --output out.tsv             # save as TSV
-  python read_devops_vars.py --group "MyGroup" --output out.env --env-format # save as KEY=VALUE
-  python read_devops_vars.py --compare "backend-uat" "backend-prod"          # compare two groups
+  python read_devops_vars.py                                         # list all variable groups
+  python read_devops_vars.py --group "MyGroup"                       # show vars in a specific group
+  python read_devops_vars.py --group "MyGroup" --key MY_VAR          # get a single value
+  python read_devops_vars.py --group "MyGroup" --output out.tsv      # save as TSV
+  python read_devops_vars.py --group "MyGroup" --output out.env --env-format  # save as KEY=VALUE
+  python read_devops_vars.py --compare "backend-uat" "backend-prod" # compare two groups
+
+  # Add / update variables
+  python read_devops_vars.py --group "MyGroup" --set FOO=bar --set BAZ=qux
+  python read_devops_vars.py --group "MyGroup" --set-secret DB_PASS=s3cr3t
+  python read_devops_vars.py --group "MyGroup" --from-file vars.tsv  # TSV: variable/value/is_secret
+  python read_devops_vars.py --group "MyGroup" --from-file vars.env  # KEY=VALUE env format
+
+  # Remove variables
+  python read_devops_vars.py --group "MyGroup" --delete FOO --delete BAR
+
+  # Combine and preview
+  python read_devops_vars.py --group "MyGroup" --from-file vars.tsv --delete OLD_KEY --dry-run
 """
 
 import argparse
@@ -144,6 +156,142 @@ def save_env(group, output_path: str, show_secrets: bool = False) -> None:
     print(f"Saved {len(variables)} variable(s) to '{output_path}'.")
 
 
+def parse_input_file(file_path: str) -> dict:
+    """
+    Parse a TSV or env-format file into {key: (value, is_secret)}.
+
+    Supported formats:
+      - TSV with header row 'variable<TAB>value<TAB>is_secret' (output of --output flag)
+      - KEY=VALUE lines, optionally double-quoted values (output of --env-format flag)
+    """
+    import csv
+
+    result: dict[str, tuple[str, bool]] = {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+        f.seek(0)
+
+        if first_line.startswith("variable\t"):
+            # TSV format saved by save_variables()
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
+                key = row["variable"]
+                value = row.get("value", "")
+                is_secret = row.get("is_secret", "false").strip().lower() == "true"
+                result[key] = (value, is_secret)
+        else:
+            # KEY=VALUE env format saved by save_env()
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                # Strip surrounding double-quotes added by save_env()
+                if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+                    value = value[1:-1]
+                result[key] = (value, False)
+
+    return result
+
+
+def set_variables_in_group(
+    project: str,
+    group_name: str,
+    set_vars: dict,
+    delete_keys: list,
+    dry_run: bool = False,
+) -> None:
+    """
+    Add/update and/or remove variables in a variable group.
+
+    Args:
+        set_vars:    {key: (value, is_secret)} — variables to add or update.
+        delete_keys: list of variable names to remove.
+        dry_run:     If True, print the planned changes without applying them.
+    """
+    from azure.devops.v7_0.task_agent.models import (
+        VariableGroupParameters,
+        VariableGroupProjectReference,
+        VariableValue,
+    )
+    from azure.devops.v7_0.task_agent.models import ProjectReference as TaskProjectReference
+
+    connection = build_connection()
+
+    # Resolve the project GUID so the API accepts the update
+    core_client = connection.clients.get_core_client()
+    proj = core_client.get_project(project)
+    project_ref = TaskProjectReference(id=proj.id, name=proj.name)
+
+    task_client = connection.clients.get_task_agent_client()
+    groups = task_client.get_variable_groups(project=project, group_name=group_name)
+    if not groups:
+        print(f"ERROR: variable group '{group_name}' not found.", file=sys.stderr)
+        sys.exit(1)
+    group = groups[0]
+
+    variables: dict = dict(group.variables) if group.variables else {}
+
+    # --- Deletions ---
+    deleted = []
+    skipped_delete = []
+    for key in delete_keys:
+        if key in variables:
+            del variables[key]
+            deleted.append(key)
+        else:
+            skipped_delete.append(key)
+
+    # --- Additions / updates ---
+    added = []
+    updated = []
+    for key, (value, is_secret) in set_vars.items():
+        if key in variables:
+            updated.append(key)
+        else:
+            added.append(key)
+        variables[key] = VariableValue(value=value, is_secret=is_secret)
+
+    # --- Summary ---
+    if not added and not updated and not deleted:
+        print("No changes to apply.")
+        if skipped_delete:
+            print(f"  Not found (skipped): {', '.join(sorted(skipped_delete))}", file=sys.stderr)
+        return
+
+    if added:
+        print(f"  Add ({len(added)}):    {', '.join(sorted(added))}")
+    if updated:
+        print(f"  Update ({len(updated)}): {', '.join(sorted(updated))}")
+    if deleted:
+        print(f"  Delete ({len(deleted)}): {', '.join(sorted(deleted))}")
+    if skipped_delete:
+        print(f"  Not found (skipped): {', '.join(sorted(skipped_delete))}", file=sys.stderr)
+
+    if dry_run:
+        print("(dry run — no changes applied)")
+        return
+
+    vg_proj_ref = VariableGroupProjectReference(
+        name=group.name,
+        description=getattr(group, "description", None),
+        project_reference=project_ref,
+    )
+    params = VariableGroupParameters(
+        name=group.name,
+        description=getattr(group, "description", None),
+        type=group.type,
+        variables=variables,
+        provider_data=getattr(group, "provider_data", None),
+        variable_group_project_references=[vg_proj_ref],
+    )
+    task_client.update_variable_group(params, group_id=group.id)
+    print(f"Variable group '{group_name}' updated successfully.")
+
+
 def compare_groups(group_a, group_b) -> bool:
     """Print a comparison of two variable groups. Returns True if identical."""
     vars_a = set(group_a.variables.keys()) if group_a.variables else set()
@@ -234,6 +382,43 @@ def parse_args() -> argparse.Namespace:
         metavar=("GROUP_A", "GROUP_B"),
         help="Compare keys and values between two variable groups.",
     )
+
+    # --- Mutation arguments ---
+    mut = parser.add_argument_group("mutation (requires --group)")
+    mut.add_argument(
+        "--set",
+        dest="set_vars",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        help="Add or update a variable. Repeat for multiple vars.",
+    )
+    mut.add_argument(
+        "--set-secret",
+        dest="set_secrets",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        help="Add or update a secret variable. Repeat for multiple vars.",
+    )
+    mut.add_argument(
+        "--delete",
+        dest="delete_keys",
+        metavar="KEY",
+        action="append",
+        default=[],
+        help="Remove a variable from the group. Repeat for multiple keys.",
+    )
+    mut.add_argument(
+        "--from-file",
+        metavar="FILE",
+        help="Load variables to add/update from a TSV or KEY=VALUE env file.",
+    )
+    mut.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned changes without applying them.",
+    )
     return parser.parse_args()
 
 
@@ -243,6 +428,45 @@ def main() -> None:
     if not args.project:
         print("ERROR: project not specified. Use --project or set AZDO_PROJECT.", file=sys.stderr)
         sys.exit(1)
+
+    # --- Set / delete variables ---
+    has_mutation = args.set_vars or args.set_secrets or args.delete_keys or args.from_file
+    if has_mutation:
+        if not args.group:
+            print("ERROR: --set/--set-secret/--delete/--from-file require --group.", file=sys.stderr)
+            sys.exit(1)
+
+        # Build the dict of vars to set: {key: (value, is_secret)}
+        set_vars: dict[str, tuple[str, bool]] = {}
+
+        # From file (lowest precedence — CLI args override)
+        if args.from_file:
+            set_vars.update(parse_input_file(args.from_file))
+
+        # Plain --set KEY=VALUE
+        for arg in args.set_vars:
+            if "=" not in arg:
+                print(f"ERROR: --set '{arg}' must be in KEY=VALUE format.", file=sys.stderr)
+                sys.exit(1)
+            key, _, value = arg.partition("=")
+            set_vars[key] = (value, False)
+
+        # --set-secret KEY=VALUE
+        for arg in args.set_secrets:
+            if "=" not in arg:
+                print(f"ERROR: --set-secret '{arg}' must be in KEY=VALUE format.", file=sys.stderr)
+                sys.exit(1)
+            key, _, value = arg.partition("=")
+            set_vars[key] = (value, True)
+
+        set_variables_in_group(
+            args.project,
+            args.group,
+            set_vars=set_vars,
+            delete_keys=args.delete_keys,
+            dry_run=args.dry_run,
+        )
+        return
 
     # --- Compare two groups ---
     if args.compare:
