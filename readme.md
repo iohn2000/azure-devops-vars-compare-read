@@ -1,17 +1,32 @@
+# run
+
+To activate the Python virtual environment in this workspace, run:
+```
+source .venv/bin/activate
+```
+
 # Usage History
 
+## marketplace
 ```bash
-python read_devops_vars.py --group anna-api-dev --set OtelEnvironment=DEV
-python read_devops_vars.py --group anna-api-dev --set OtelEndpoint=http://alloy-central.alloy-test-internal:14317 
+python az-vars.py --project marketplace-accounting --group backend-prod --set OtelEnvironment=PROD
+python az-vars.py --project marketplace-accounting --group backend-prod --set OtelEndpoint=http://alloy-central.alloy-prod-internal:14317
 
-python read_devops_vars.py --group anna-api-uat --set OtelEnvironment=UAT
-python read_devops_vars.py --group anna-api-uat --set OtelEndpoint=http://alloy-central.alloy-test-internal:14317 
+python az-vars.py --project marketplace-accounting --group backend-uat --set OtelEnvironment=UAT
+python az-vars.py --project marketplace-accounting --group backend-uat --set OtelEndpoint=http://alloy-central.alloy-test-internal:14317
+```
 
-python read_devops_vars.py --group anna-api-prod --set OtelEnvironment=PROD
-python read_devops_vars.py --group anna-api-prod --set OtelEndpoint=xx  
+```bash
+python az-vars.py --group anna-api-dev --set OtelEnvironment=DEV
+python az-vars.py --group anna-api-dev --set OtelEndpoint=http://alloy-central.alloy-test-internal:14317 
 
+python az-vars.py --group anna-api-uat --set OtelEnvironment=UAT
+python az-vars.py --group anna-api-uat --set OtelEndpoint=http://alloy-central.alloy-test-internal:14317 
 
-python read_devops_vars.py --group _removed_annaproxy-api-grafana-dev-vars
+python az-vars.py --group anna-api-prod --set OtelEnvironment=PROD
+python az-vars.py --group anna-api-prod --set OtelEndpoint=http://alloy-central.alloy-prod-internal:14317
+
+python az-vars.py --group _removed_annaproxy-api-grafana-dev-vars
   Variable Group: _removed_annaproxy-api-grafana-dev-vars  (id=141)
 
   Variable                                 Value
@@ -26,5 +41,5 @@ python read_devops_vars.py --group _removed_annaproxy-api-grafana-dev-vars
   GrafanaTracesEndpoint                    tempo-prod-10-prod-eu-west-2.grafana.net:443
   GrafanaTracesUser                        465302
 
-python read_devops_vars.py --group _removed_annaproxy-api-grafana-dev-vars --delete GrafanaLogsUser
+python az-vars.py --group _removed_annaproxy-api-grafana-dev-vars --delete GrafanaLogsUser
 ```
